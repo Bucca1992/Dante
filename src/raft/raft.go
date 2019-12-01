@@ -87,6 +87,7 @@ type LogEntry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	DPrintf("%d state %d", rf.me, rf.state)
 	return rf.currentTerm, rf.state == Leader
 }
 
@@ -379,33 +380,50 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) startElection() {
-	grantCount := 1
-
+	grantCount := 0
+	finishCount := 0
+	DPrintf("%d start election", rf.me)
 	rf.resetTimer()
-	// todo: use goroutine to parallelize.
+	grantChannel := make(chan bool)
 	for peer := 0; peer < len(rf.peers); peer++ {
-		if peer != rf.me {
-			lastLogTerm := 0
-			lastLogIndex := 0
-			if len(rf.log) > 0 {
-				lastLogTerm = rf.log[len(rf.log)-1].Term
-				lastLogIndex = len(rf.log)
+		go func(peer int, grantChannel chan bool) {
+			if peer != rf.me {
+				lastLogTerm := 0
+				lastLogIndex := 0
+				if len(rf.log) > 0 {
+					lastLogTerm = rf.log[len(rf.log)-1].Term
+					lastLogIndex = len(rf.log)
+				}
+				args := RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateId:  rf.me,
+					LastLogIndex: lastLogIndex,
+					LastLogTerm:  lastLogTerm,
+				}
+				reply := RequestVoteReply{}
+				ok := rf.sendRequestVote(peer, &args, &reply)
+				DPrintf("%d voted for %d:%t.", peer, args.CandidateId, reply.VoteGranted)
+				if ok && reply.VoteGranted {
+					grantChannel <- true
+				} else {
+					grantChannel <- false
+				}
+				return
 			}
-			args := RequestVoteArgs{
-				Term:         rf.currentTerm,
-				CandidateId:  rf.me,
-				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastLogTerm,
-			}
-			reply := RequestVoteReply{}
-			ok := rf.sendRequestVote(peer, &args, &reply)
-			if ok && reply.VoteGranted {
+			grantChannel <- true
+		}(peer, grantChannel)
+	}
+	for finishCount < len(rf.peers) && grantCount < len(rf.peers) / 2 + 1 {
+		select {
+		case g := <-grantChannel:
+			if g {
 				grantCount++
 			}
+			finishCount++
 		}
 	}
 	DPrintf("Number of votes for %d: %d", rf.me, grantCount)
-	if grantCount >= len(rf.peers)/2+1 {
+	if grantCount >= len(rf.peers) / 2 + 1 {
 		rf.state = Leader
 		rf.sendHeartBeat()
 	}
